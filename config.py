@@ -1,4 +1,5 @@
-# config.py
+# config.py ke top par yeh line honi chahiye:
+import os
 
 # REQUIRED
 BOT_TOKEN = "8090736841:AAEi5FkCzBhccIU8RbZBxmPTDq2V7a2c4UE"   # BotFather ka token daalein
