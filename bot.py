@@ -10,6 +10,24 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
+# add at top
+from aiohttp import web
+
+# in main(), before run_webhook:
+web_app = web.Application()
+web_app.router.add_get("/", lambda request: web.Response(text="OK"))
+
+app.run_webhook(
+    web_app=web_app,                 # <— add this
+    listen="0.0.0.0",
+    port=config.PORT,
+    url_path=config.WEBHOOK_PATH,
+    webhook_url=config.WEBHOOK_URL,
+    secret_token=config.WEBHOOK_SECRET,
+    allowed_updates=config.ALLOWED_UPDATES,
+    drop_pending_updates=True,
+)
+
 # Enable HEIC/HEIF support for Pillow
 register_heif_opener()
 
