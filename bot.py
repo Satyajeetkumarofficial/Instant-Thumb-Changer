@@ -1,10 +1,11 @@
 import io
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# External libs
 from PIL import Image, ImageFilter, ImageOps
 
-# HEIC/HEIF support (safe if not available)
+# Optional HEIC/HEIF support
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
@@ -13,7 +14,7 @@ except Exception as e:
     print("pillow-heif not available; HEIC/HEIF disabled:", e)
     HEIF_OK = False
 
-# Try to import aiohttp for webhook server
+# Try aiohttp for webhook
 try:
     from aiohttp import web
     HAVE_AIOHTTP = True
@@ -316,17 +317,32 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# -------- Web server for health (Koyeb) --------
-async def _health(_: web.Request) -> web.Response:
-    return web.Response(text="OK", content_type="text/plain")
+# -------- Fallback health server (no aiohttp) --------
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return  # silence
+
+
+def _start_health_server():
+    try:
+        server = HTTPServer(("0.0.0.0", config.PORT), _HealthHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        log.info("Health server (built-in) running on http://0.0.0.0:%s", config.PORT)
+    except Exception as e:
+        log.warning("Health server failed to start: %s", e)
 
 
 def main():
     # Basic sanity checks
     if not config.BOT_TOKEN or "PASTE_YOUR_BOT_TOKEN_HERE" in config.BOT_TOKEN:
         raise RuntimeError("Set BOT_TOKEN in config.py or as env var.")
-    if not config.PUBLIC_URL or "koyeb" not in config.PUBLIC_URL:
-        log.warning("PUBLIC_URL looks suspicious. Set the correct Koyeb URL for webhooks: %s", config.PUBLIC_URL)
 
     app = Application.builder().token(config.BOT_TOKEN).build()
 
@@ -342,13 +358,11 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_new_thumb_from_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, media_handler))
 
-    # Run via webhook (preferred on Koyeb) or fallback to polling if aiohttp missing
     if HAVE_AIOHTTP:
+        # Webhook mode with aiohttp app + health endpoints
         web_app = web.Application()
-        # Health endpoints for Koyeb
-        web_app.router.add_get("/", _health)
-        web_app.router.add_get("/healthz", _health)
-
+        web_app.router.add_get("/", lambda request: web.Response(text="OK"))
+        web_app.router.add_get("/healthz", lambda request: web.Response(text="OK"))
         log.info("Starting webhook server on port %s", config.PORT)
         log.info("Webhook URL: %s", config.WEBHOOK_URL)
         app.run_webhook(
@@ -356,14 +370,15 @@ def main():
             listen="0.0.0.0",
             port=config.PORT,
             url_path=config.WEBHOOK_PATH,
-            webhook_url=config.WEBHOOK_URL,       # PTB will call setWebhook with this
+            webhook_url=config.WEBHOOK_URL,
             secret_token=config.WEBHOOK_SECRET,
             allowed_updates=config.ALLOWED_UPDATES,
             drop_pending_updates=True,
         )
     else:
-        # Local debugging fallback
-        log.warning("Falling back to long polling (aiohttp missing). Use python-telegram-bot[webhooks] for webhooks.")
+        # Polling mode + tiny health server so Koyeb checks pass
+        _start_health_server()
+        log.warning("Running in long polling mode (install aiohttp for webhooks).")
         app.run_polling(
             allowed_updates=config.ALLOWED_UPDATES,
             drop_pending_updates=True,
