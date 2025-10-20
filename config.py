@@ -9,17 +9,16 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-this-secret")  # set a stro
 PORT = int(os.getenv("PORT", "8080"))
 
 # Features
-THUMB_MAX_MB = float(os.getenv("THUMB_MAX_MB", "5"))  # Poster (separate message) max size
+THUMB_MAX_MB = float(os.getenv("THUMB_MAX_MB", "5"))  # Poster (separate photo) max size
 DEFAULT_STYLE = os.getenv("DEFAULT_STYLE", "yt")       # yt | yt_fit | square | auto
 POSTER_MODE_DEFAULT = os.getenv("POSTER_MODE_DEFAULT", "false").lower() in ("1", "true", "yes", "on")
 
 # Telegram hard limits (do not change)
-THUMB_TELEGRAM_MAX_BYTES = 200 * 1024     # attached thumbnail max size
-THUMB_TELEGRAM_MAX_DIM = (320, 320)       # max side
-TARGET_YT_DIM = (320, 180)                # 16:9 YouTube-like
+THUMB_TELEGRAM_MAX_BYTES = 200 * 1024
+THUMB_TELEGRAM_MAX_DIM = (320, 320)
+TARGET_YT_DIM = (320, 180)
 
 # Derived
 WEBHOOK_PATH = f"webhook/{WEBHOOK_SECRET}"
 WEBHOOK_URL = PUBLIC_URL.rstrip("/") + "/" + WEBHOOK_PATH
-
 ALLOWED_UPDATES = ["message"]
