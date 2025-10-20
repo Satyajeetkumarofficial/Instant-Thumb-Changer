@@ -1,8 +1,6 @@
-import logging
-from io import BytesIO
-from typing import Tuple
-
+import io
 import config
+from typing import Tuple
 
 from PIL import Image, ImageFilter, ImageOps
 from pillow_heif import register_heif_opener
@@ -12,48 +10,38 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-# Logging
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-log = logging.getLogger("thumb-bot")
-
-# HEIC/HEIF support
+# Enable HEIC/HEIF support for Pillow
 register_heif_opener()
 
-# ---------------- Telegram limits ----------------
-THUMB_TELEGRAM_MAX_BYTES = 200 * 1024
-THUMB_TELEGRAM_MAX_DIM: Tuple[int, int] = (320, 320)
-TARGET_YT_DIM: Tuple[int, int] = (320, 180)
-THUMB_ACCEPT_MAX_BYTES = int(config.THUMB_MAX_MB * 1024 * 1024)
-
-# ---------------- In-memory stores (ephemeral) ----------------
-USER_THUMB_COMPRESSED: dict[int, bytes] = {}  # <=200KB JPEG for Telegram
+# -------- In-memory stores (ephemeral; use Redis/DB if you need persistence) --------
+USER_THUMB_COMPRESSED: dict[int, bytes] = {}  # <=200KB JPEG for Telegram attached thumbnail
 USER_THUMB_ORIGINAL: dict[int, bytes] = {}    # poster image (<=5MB)
 USER_SETTINGS: dict[int, dict] = {}           # {"poster_mode": bool, "thumb_style": str}
 AWAITING_THUMB: set[int] = set()
 
-# ---------------- Helpers ----------------
+THUMB_ACCEPT_MAX_BYTES = int(config.THUMB_MAX_MB * 1024 * 1024)
+
+# -------- Helpers: settings --------
 def get_settings(uid: int) -> dict:
     s = USER_SETTINGS.get(uid)
     if not s:
         s = {
-            "poster_mode": bool(config.POSTER_MODE_DEFAULT),
-            "thumb_style": str(config.DEFAULT_THUMB_STYLE or "yt").lower(),
+            "poster_mode": config.POSTER_MODE_DEFAULT,
+            "thumb_style": config.DEFAULT_STYLE.lower(),
         }
         USER_SETTINGS[uid] = s
     return s
 
+# -------- Image helpers --------
 def load_image_any(image_bytes: bytes) -> Image.Image:
-    im = Image.open(BytesIO(image_bytes))
+    im = Image.open(io.BytesIO(image_bytes))
     im = ImageOps.exif_transpose(im)
     if getattr(im, "is_animated", False):
         im.seek(0)
     return im.convert("RGB")
 
 def jpeg_fit_under(bytes_target: int, img: Image.Image) -> bytes:
-    out = BytesIO()
+    out = io.BytesIO()
     for q in (90, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20):
         out.seek(0); out.truncate(0)
         img.save(out, format="JPEG", quality=q, optimize=True, progressive=True, subsampling=2)
@@ -63,7 +51,7 @@ def jpeg_fit_under(bytes_target: int, img: Image.Image) -> bytes:
 
 def make_thumb_auto(img: Image.Image) -> Image.Image:
     im = img.copy()
-    im.thumbnail(THUMB_TELEGRAM_MAX_DIM, Image.LANCZOS)
+    im.thumbnail(config.THUMB_TELEGRAM_MAX_DIM, Image.LANCZOS)
     im = im.filter(ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3))
     return im
 
@@ -73,12 +61,12 @@ def make_thumb_square(img: Image.Image) -> Image.Image:
     return im
 
 def make_thumb_yt_cover(img: Image.Image) -> Image.Image:
-    im = ImageOps.fit(img, TARGET_YT_DIM, method=Image.LANCZOS, centering=(0.5, 0.5))
+    im = ImageOps.fit(img, config.TARGET_YT_DIM, method=Image.LANCZOS, centering=(0.5, 0.5))
     im = im.filter(ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3))
     return im
 
 def make_thumb_yt_fit(img: Image.Image) -> Image.Image:
-    W, H = TARGET_YT_DIM
+    W, H = config.TARGET_YT_DIM
     bg = ImageOps.fit(img, (W, H), method=Image.LANCZOS)
     bg = bg.filter(ImageFilter.GaussianBlur(radius=12))
     fg = img.copy()
@@ -91,33 +79,35 @@ def make_thumb_yt_fit(img: Image.Image) -> Image.Image:
 
 def prepare_thumbnail(image_bytes: bytes, style: str) -> bytes:
     base = load_image_any(image_bytes)
-    s = (style or "yt").lower()
-    if s == "yt":
+    style = (style or "yt").lower()
+    if style == "yt":
         im = make_thumb_yt_cover(base)
-    elif s in ("yt_fit", "ytfit", "yt-fit"):
+    elif style in ("yt_fit", "ytfit", "yt-fit"):
         im = make_thumb_yt_fit(base)
-    elif s == "square":
+    elif style == "square":
         im = make_thumb_square(base)
     else:
         im = make_thumb_auto(base)
-    return jpeg_fit_under(THUMB_TELEGRAM_MAX_BYTES, im)
+    return jpeg_fit_under(config.THUMB_TELEGRAM_MAX_BYTES, im)
 
 def build_tg_file_url(bot_token: str, file_path: str) -> str:
     return f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
 
-# ---------------- Handlers ----------------
+# -------- Handlers --------
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    s = get_settings(update.effective_user.id)
     await update.message.reply_text(
         "Namaste! 👋\n"
-        "Yeh bot aapke video/document ka thumbnail YouTube-style (16:9) ya square/auto me attach karta hai.\n"
+        "Yeh bot aapke video/document ka thumbnail YouTube-style bana ke attach karta hai.\n"
         "Server-side copy: bade files download/upload nahi hote.\n\n"
         "Commands:\n"
-        "• /setthumb – thumbnail/poster set karein (photo ya image document bhejein)\n"
+        "• /setthumb – thumbnail/poster set karein (photo ya image document)\n"
         "• /showthumb – current thumbnail/poster dekhein\n"
         "• /clearthumb – thumbnail/poster hataayein\n"
         "• /poster – poster mode ON/OFF (poster = 5MB tak high-res photo, separate message)\n"
         "• /style yt | yt_fit | square | auto – thumbnail style set karein\n\n"
-        "Note: Telegram attached thumbnail limit = JPEG, ≤200KB, side ≤320. Poster 5MB tak allowed (separate)."
+        f"Current style: {s['thumb_style']} | Poster mode: {'ON' if s['poster_mode'] else 'OFF'}\n"
+        "Note: Attached thumbnail limit = JPEG, ≤200KB, side ≤320."
     )
 
 async def poster(update: Update, _: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +187,7 @@ async def handle_new_thumb_from_photo(update: Update, _: ContextTypes.DEFAULT_TY
     if f.file_size and f.file_size > THUMB_ACCEPT_MAX_BYTES:
         await update.message.reply_text("Image bahut badi hai. Kripya ≤5MB image bhejein (as Document).")
         return
-    mem = BytesIO()
+    mem = io.BytesIO()
     await f.download_to_memory(out=mem)
     original = mem.getvalue()
     USER_THUMB_ORIGINAL[uid] = original
@@ -216,7 +206,7 @@ async def maybe_handle_thumb_from_document(update: Update) -> bool:
         AWAITING_THUMB.discard(uid)
         return True
     f = await doc.get_file()
-    mem = BytesIO()
+    mem = io.BytesIO()
     await f.download_to_memory(out=mem)
     original = mem.getvalue()
     USER_THUMB_ORIGINAL[uid] = original
@@ -243,31 +233,27 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = await msg.reply_text("Turbo mode: server-side copy… ⚡")
 
     try:
-        # 1) Get Telegram file URL (no local download of big media)
         file = await (msg.video.get_file() if msg.video else msg.document.get_file())
         file_url = build_tg_file_url(context.bot.token, file.file_path)
 
-        # 2) Prepare thumbnail InputFile (compressed) if available
         thumb_bytes = USER_THUMB_COMPRESSED.get(uid)
-        thumb_if = InputFile(BytesIO(thumb_bytes), filename="thumb.jpg") if thumb_bytes else None
+        thumb_if = InputFile(io.BytesIO(thumb_bytes), filename="thumb.jpg") if thumb_bytes else None
 
-        # 3) Optional poster
         settings = get_settings(uid)
         if settings.get("poster_mode") and uid in USER_THUMB_ORIGINAL:
             try:
                 await msg.reply_photo(
-                    photo=InputFile(BytesIO(USER_THUMB_ORIGINAL[uid]), filename="poster.jpg")
+                    photo=InputFile(io.BytesIO(USER_THUMB_ORIGINAL[uid]), filename="poster.jpg")
                 )
-            except Exception as e:
-                log.warning("Poster send failed: %s", e)
+            except Exception:
+                pass  # continue even if poster fails
 
-        # 4) Re-send media with new thumbnail (Telegram internal fetch)
         if msg.video:
             await msg.reply_video(
                 video=file_url,
                 caption=caption,
                 supports_streaming=True,
-                thumbnail=thumb_if  # JPEG ≤200KB, side ≤320
+                thumbnail=thumb_if
             )
         else:
             await msg.reply_document(
@@ -278,25 +264,18 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await info.edit_text("Done ✅ Thumbnail updated (server-side).")
     except Exception as e:
-        log.exception("Processing failed")
         await info.edit_text(
             "Error: {err}\n"
-            "Note: Thumbnail must be JPEG, ≤200KB, side ≤320. Poster photo can be up to 5MB."
+            "Note: Attached thumbnail must be JPEG, ≤200KB, side ≤320. Poster photo can be up to 5MB."
             .format(err=e)
         )
 
-# ---------- Webhook bootstrap (Koyeb) ----------
-async def on_startup(app: Application):
-    public_url = str(config.PUBLIC_URL).rstrip("/")
-    webhook_url = f"{public_url}/{config.WEBHOOK_PATH}"
-    await app.bot.set_webhook(
-        url=webhook_url,
-        secret_token=(config.WEBHOOK_SECRET or None),
-        allowed_updates=config.ALLOWED_UPDATES,
-    )
-    log.info("Webhook set to %s", webhook_url)
-
 def main():
+    if not config.BOT_TOKEN or "PASTE_YOUR_BOT_TOKEN_HERE" in config.BOT_TOKEN:
+        raise RuntimeError("Set BOT_TOKEN in config.py or as env var.")
+    if not config.PUBLIC_URL or "your_koyeb" in config.PUBLIC_URL:
+        print("Warning: PUBLIC_URL not set properly. Set it for webhooks on Koyeb.")
+
     app = Application.builder().token(config.BOT_TOKEN).build()
 
     # Commands
@@ -311,16 +290,13 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_new_thumb_from_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, media_handler))
 
-    # Webhook server for Koyeb
-    app.post_init = on_startup  # set webhook after bot starts
-
-    log.info("Starting webhook server on 0.0.0.0:%s path=/%s", config.PORT, config.WEBHOOK_PATH)
+    print("Starting webhook server…")
     app.run_webhook(
         listen="0.0.0.0",
         port=config.PORT,
         url_path=config.WEBHOOK_PATH,
-        webhook_url=None,  # we set it in on_startup
-        secret_token=(config.WEBHOOK_SECRET or None),
+        webhook_url=config.WEBHOOK_URL,
+        secret_token=config.WEBHOOK_SECRET,
         allowed_updates=config.ALLOWED_UPDATES,
         drop_pending_updates=True,
     )
