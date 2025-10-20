@@ -1,8 +1,8 @@
 # config.py
 
 # REQUIRED
-BOT_TOKEN = "123456:ABCDEF-your-bot-token"   # BotFather ka token daalein
-PUBLIC_URL = "https://your-app-xyz.koyeb.app"  # Koyeb service ka HTTPS URL
+BOT_TOKEN = "8090736841:AAEi5FkCzBhccIU8RbZBxmPTDq2V7a2c4UE"   # BotFather ka token daalein
+PUBLIC_URL = "https://small-kiley-santoshh-f856e5f5.koyeb.app"  # Koyeb service ka HTTPS URL
 
 # Security
 WEBHOOK_SECRET = "replace-with-strong-random"   # strong random string (e.g., openssl rand -hex 16)
