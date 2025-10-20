@@ -1,3 +1,4 @@
+import os
 import io
 import logging
 import threading
@@ -14,12 +15,12 @@ except Exception as e:
     print("pillow-heif not available; HEIC/HEIF disabled:", e)
     HEIF_OK = False
 
-# Try aiohttp for webhook
+# Try aiohttp for webhook (optional)
 try:
     from aiohttp import web
     HAVE_AIOHTTP = True
 except Exception as e:
-    print("aiohttp not available; webhook server disabled, will fall back to polling:", e)
+    print("aiohttp not available; webhook mode will be disabled unless USE_WEBHOOK=false:", e)
     HAVE_AIOHTTP = False
 
 import config
@@ -32,14 +33,13 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("thumb-bot")
 
-# -------- In-memory stores (ephemeral; use Redis/DB if persistence needed) --------
-USER_THUMB_COMPRESSED: dict[int, bytes] = {}  # <=200KB JPEG for attached thumbnail
+# -------- In-memory stores (ephemeral; use Redis/DB for persistence if needed) --------
+USER_THUMB_COMPRESSED: dict[int, bytes] = {}  # <=200KB JPEG (attached thumbnail)
 USER_THUMB_ORIGINAL: dict[int, bytes] = {}    # poster image (<=5MB)
 USER_SETTINGS: dict[int, dict] = {}           # {"poster_mode": bool, "thumb_style": str}
 AWAITING_THUMB: set[int] = set()
 
 THUMB_ACCEPT_MAX_BYTES = int(config.THUMB_MAX_MB * 1024 * 1024)
-
 
 # -------- Helpers: settings --------
 def get_settings(uid: int) -> dict:
@@ -52,15 +52,13 @@ def get_settings(uid: int) -> dict:
         USER_SETTINGS[uid] = s
     return s
 
-
 # -------- Image helpers --------
 def load_image_any(image_bytes: bytes) -> Image.Image:
     im = Image.open(io.BytesIO(image_bytes))
     im = ImageOps.exif_transpose(im)  # respect orientation
     if getattr(im, "is_animated", False):
-        im.seek(0)  # take first frame
+        im.seek(0)  # first frame
     return im.convert("RGB")
-
 
 def jpeg_fit_under(bytes_target: int, img: Image.Image) -> bytes:
     out = io.BytesIO()
@@ -71,32 +69,26 @@ def jpeg_fit_under(bytes_target: int, img: Image.Image) -> bytes:
             return out.getvalue()
     return out.getvalue()
 
-
 def make_thumb_auto(img: Image.Image) -> Image.Image:
     im = img.copy()
     im.thumbnail(config.THUMB_TELEGRAM_MAX_DIM, Image.LANCZOS)
     im = im.filter(ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3))
     return im
 
-
 def make_thumb_square(img: Image.Image) -> Image.Image:
     im = ImageOps.fit(img, (320, 320), method=Image.LANCZOS, centering=(0.5, 0.5))
     im = im.filter(ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3))
     return im
-
 
 def make_thumb_yt_cover(img: Image.Image) -> Image.Image:
     im = ImageOps.fit(img, config.TARGET_YT_DIM, method=Image.LANCZOS, centering=(0.5, 0.5))
     im = im.filter(ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3))
     return im
 
-
 def make_thumb_yt_fit(img: Image.Image) -> Image.Image:
     W, H = config.TARGET_YT_DIM
-    # Background: blurred cover
     bg = ImageOps.fit(img, (W, H), method=Image.LANCZOS)
     bg = bg.filter(ImageFilter.GaussianBlur(radius=12))
-    # Foreground: fit inside
     fg = img.copy()
     fg.thumbnail((W, H), Image.LANCZOS)
     x = (W - fg.width) // 2
@@ -104,7 +96,6 @@ def make_thumb_yt_fit(img: Image.Image) -> Image.Image:
     bg.paste(fg, (x, y))
     bg = bg.filter(ImageFilter.UnsharpMask(radius=1.0, percent=110, threshold=3))
     return bg
-
 
 def prepare_thumbnail(image_bytes: bytes, style: str) -> bytes:
     base = load_image_any(image_bytes)
@@ -119,10 +110,8 @@ def prepare_thumbnail(image_bytes: bytes, style: str) -> bytes:
         im = make_thumb_auto(base)
     return jpeg_fit_under(config.THUMB_TELEGRAM_MAX_BYTES, im)
 
-
 def build_tg_file_url(bot_token: str, file_path: str) -> str:
     return f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-
 
 # -------- Handlers --------
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
@@ -141,13 +130,11 @@ async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
         "Note: Attached thumbnail limit = JPEG, ≤200KB, side ≤320."
     )
 
-
 async def poster(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     s = get_settings(uid)
     s["poster_mode"] = not s.get("poster_mode", False)
     await update.message.reply_text(f"Poster mode: {'ON ✅' if s['poster_mode'] else 'OFF ❌'}")
-
 
 async def style_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -170,13 +157,11 @@ async def style_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE):
     s["thumb_style"] = val
     await update.message.reply_text(f"Style set: {val} ✅")
 
-
 async def clearthumb(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     USER_THUMB_ORIGINAL.pop(uid, None)
     USER_THUMB_COMPRESSED.pop(uid, None)
     await update.message.reply_text("Thumbnail/Poster clear kar diya ✅")
-
 
 async def showthumb(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -197,7 +182,6 @@ async def showthumb(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if not has_any:
         await update.message.reply_text("Aapne abhi tak thumbnail set nahi kiya. /setthumb use karein.")
 
-
 async def setthumb(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     AWAITING_THUMB.add(uid)
@@ -210,11 +194,9 @@ async def setthumb(update: Update, _: ContextTypes.DEFAULT_TYPE):
         f"Style: {s['thumb_style']} (change via /style)."
     )
 
-
 def is_image_document(update: Update) -> bool:
     msg = update.message
     return bool(msg and msg.document and msg.document.mime_type and msg.document.mime_type.startswith("image/"))
-
 
 async def handle_new_thumb_from_photo(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -233,7 +215,6 @@ async def handle_new_thumb_from_photo(update: Update, _: ContextTypes.DEFAULT_TY
     USER_THUMB_COMPRESSED[uid] = prepare_thumbnail(original, s["thumb_style"])
     AWAITING_THUMB.discard(uid)
     await update.message.reply_text("Thumbnail/Poster set ho gaya ✅")
-
 
 async def maybe_handle_thumb_from_document(update: Update) -> bool:
     uid = update.effective_user.id
@@ -254,7 +235,6 @@ async def maybe_handle_thumb_from_document(update: Update) -> bool:
     AWAITING_THUMB.discard(uid)
     await update.message.reply_text("Thumbnail/Poster set ho gaya (document se) ✅")
     return True
-
 
 async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -316,31 +296,26 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             .format(err=e)
         )
 
-
-# -------- Fallback health server (no aiohttp) --------
+# -------- Minimal health server (for Koyeb) --------
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
-
     def log_message(self, format, *args):
-        return  # silence
-
+        return  # silence logs
 
 def _start_health_server():
     try:
         server = HTTPServer(("0.0.0.0", config.PORT), _HealthHandler)
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
-        log.info("Health server (built-in) running on http://0.0.0.0:%s", config.PORT)
+        log.info("Health server running on http://0.0.0.0:%s", config.PORT)
     except Exception as e:
         log.warning("Health server failed to start: %s", e)
 
-
 def main():
-    # Basic sanity checks
     if not config.BOT_TOKEN or "PASTE_YOUR_BOT_TOKEN_HERE" in config.BOT_TOKEN:
         raise RuntimeError("Set BOT_TOKEN in config.py or as env var.")
 
@@ -358,15 +333,14 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_new_thumb_from_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, media_handler))
 
-    if HAVE_AIOHTTP:
-        # Webhook mode with aiohttp app + health endpoints
-        web_app = web.Application()
-        web_app.router.add_get("/", lambda request: web.Response(text="OK"))
-        web_app.router.add_get("/healthz", lambda request: web.Response(text="OK"))
+    # Mode selection
+    use_webhook = os.getenv("USE_WEBHOOK", "false").lower() in ("1", "true", "yes", "on")
+
+    if use_webhook and HAVE_AIOHTTP:
+        # Webhook mode (no custom health route here; set Koyeb health check to TCP)
         log.info("Starting webhook server on port %s", config.PORT)
         log.info("Webhook URL: %s", config.WEBHOOK_URL)
         app.run_webhook(
-            web_app=web_app,
             listen="0.0.0.0",
             port=config.PORT,
             url_path=config.WEBHOOK_PATH,
@@ -376,14 +350,15 @@ def main():
             drop_pending_updates=True,
         )
     else:
-        # Polling mode + tiny health server so Koyeb checks pass
+        # Polling mode with health server (recommended if Koyeb health check = HTTP GET /)
         _start_health_server()
-        log.warning("Running in long polling mode (install aiohttp for webhooks).")
+        if use_webhook and not HAVE_AIOHTTP:
+            log.warning("USE_WEBHOOK set but aiohttp not installed. Falling back to polling.")
+        log.info("Running in long polling mode.")
         app.run_polling(
             allowed_updates=config.ALLOWED_UPDATES,
             drop_pending_updates=True,
         )
-
 
 if __name__ == "__main__":
     main()
